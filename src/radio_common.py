@@ -1,30 +1,24 @@
-# radio_common.py
-import serial
-import threading
-import time
+import hamlib
 
 class IC7300:
-    def __init__(self, port="/dev/ttyUSB0", baudrate=19200):
-        self.ser = serial.Serial(port, baudrate, timeout=1)
-        self.tx_lock = threading.Lock()
-
-    def send_cat(self, command_bytes):
-        self.ser.write(command_bytes)
-        return self.ser.read(100)
+    def __init__(self):
+        hamlib.rig_set_debug(hamlib.RIG_DEBUG_NONE)
+        self.rig = hamlib.Rig(307)
+        self.rig.set_conf("rig_pathname", "/dev/ttyUSB0")
+        self.rig.open()
 
     def set_mode(self, mode):
-        MODES = {
-            'USB': b'\x01\x04\x01\x00',
-            'CW':  b'\x01\x04\x03\x00',
+        modes = {
+            'USB': hamlib.RIG_MODE_USB,
+            'CW': hamlib.RIG_MODE_CW
         }
-        cmd = b'\xfe\xfe\x94\xe0' + MODES[mode] + b'\xfd'
-        return self.send_cat(cmd)
+        self.rig.set_mode(modes[mode], 0)
 
     def ptt_on(self):
-        return self.send_cat(b'\xfe\xfe\x94\xe0\x1c\x00\x01\xfd')
+        self.rig.set_ptt(1)
 
     def ptt_off(self):
-        return self.send_cat(b'\xfe\xfe\x94\xe0\x1c\x00\x00\xfd')
+        self.rig.set_ptt(0)
 
     def close(self):
-        self.ser.close()
+        self.rig.close()
