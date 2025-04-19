@@ -12,14 +12,31 @@ CW_TABLE = {v: k for k, v in MORSE_CODE.items()}  # Reverse lookup
 def send_cw(radio, message):
     for char in message.upper():
         if char == ' ':
-            time.sleep(DOT_DURATION * 7)  # Space between words
-        elif char in CW_TABLE:
-            for symbol in CW_TABLE[char]:
-                radio.ptt_on()
-                time.sleep(DOT_DURATION if symbol == '.' else DOT_DURATION * 3)
-                radio.ptt_off()
-                time.sleep(DOT_DURATION)  # Gap between symbols
-            time.sleep(DOT_DURATION * 3)  # Gap between letters
+            time.sleep(DOT_DURATION * 7)  # inter-word space
+            continue
+
+        morse = CW_TABLE.get(char)
+        if not morse:
+            continue
+
+        for i, symbol in enumerate(morse):
+            t_1 = time.time()
+            radio.ptt_on()
+            t_2 = time.time()
+            print(t_2 - t_1)
+            time.sleep(DOT_DURATION if symbol == '.' else DOT_DURATION * 3)
+            t_3 = time.time()
+            radio.ptt_off()
+            t_4 = time.time()
+            print(t_4 - t_3)
+
+            # inter-element space (not after final element)
+            if i < len(morse) - 1:
+                time.sleep(DOT_DURATION)
+
+        # inter-character space
+        time.sleep(DOT_DURATION * 3)
+
 
 def cw_rx_loop(radio: IC7300):
     from cw_decoder import CWDecoder

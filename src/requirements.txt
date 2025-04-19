@@ -1,0 +1,4 @@
+pyhamlib
+sounddevice
+numpy
+scipy
