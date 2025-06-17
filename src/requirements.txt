@@ -2,3 +2,5 @@ pyhamlib
 sounddevice
 numpy
 scipy
+pyaudio
+ggwave
