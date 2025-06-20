@@ -4,7 +4,7 @@ import subprocess
 import threading
 
 class IC7300:
-    def __init__(self, device="/dev/cu.SLAB_USBtoUART", model=3073, baud=115200):
+    def __init__(self, device="/dev/ttyUSB0", model=3073, baud=115200):
         self.device = device
         self.model = model
         self.baud = baud
@@ -31,7 +31,13 @@ class IC7300:
     def set_mode(self, mode):
         """Set mode and passband."""
         mode_map = {
+            # Sideband
             "USB": ("USB", "2400"),
+            "LSB": ("LSB", "2400"),
+            # Data
+            "USB-D": ("USB", "2400", "DIG_MODE", "1"),
+            "LSB-D": ("LSB", "2400", "DIG_MODE", "1"),
+            # CW 
             "CW": ("CW", "500")
         }
         if mode not in mode_map:
@@ -39,8 +45,8 @@ class IC7300:
         mode_str, passband = mode_map[mode]
 
         # Optional: set a default frequency to help rig accept mode switch
-        self.set_freq(14070000)
-        self._rigctl("M", mode_str, passband)
+        self.set_freq(14086430)
+        self._rigctl("M", mode)
 
     def ptt_on(self):
         self._rigctl("T", "1")
