@@ -21,47 +21,66 @@ def detect_sfd_pair_region(data, fs, band=(350, 3500),
                            baseline_window_sec=2.0,
                            min_duration_sec=0.1,
                            min_rise_db=10,
+                           min_sfd_duration_sec=0.25,
+                           min_bandwidth_hz=700,
                            pad_sec=0.1):
     """
-    Detect GGWave start and end delimiter bursts and return the region spanning both.
-    Returns (start_sample, end_sample) or (None, None).
+    Detect GGWave start and end delimiter bursts using adaptive energy rise, duration,
+    and frequency spread. Returns (start_sample, end_sample) or (None, None).
     """
+    from scipy.signal import spectrogram
+
     nperseg = 1024
     noverlap = nperseg // 2
     f, t, Sxx = spectrogram(data, fs=fs, nperseg=nperseg, noverlap=noverlap)
 
-    # Compute band-limited power
     f_mask = (f >= band[0]) & (f <= band[1])
     band_power = Sxx[f_mask].mean(axis=0)
     band_power_db = 10 * np.log10(band_power + 1e-10)
 
-    # Adaptive rise over baseline
     baseline_win = int((baseline_window_sec * fs) / (nperseg - noverlap))
     smoothed_baseline = np.convolve(band_power_db, np.ones(baseline_win) / baseline_win, mode='same')
     delta_db = band_power_db - smoothed_baseline
 
-    # Mark frames where signal rises significantly
     min_frames = int((min_duration_sec / (nperseg / fs)) + 0.5)
-    above_delta = delta_db > min_rise_db
-
-    # Identify all SFD/EFD bursts
     sfd_regions = []
+
     count = 0
-    for i, val in enumerate(above_delta):
+    for i, val in enumerate(delta_db > min_rise_db):
         if val:
             count += 1
             if count == min_frames:
-                region_start = t[i - count + 1]
+                start_idx = i - count + 1
+                region_start = t[start_idx]
         else:
             if count >= min_frames:
-                region_end = t[i]
-                sfd_regions.append((region_start, region_end))
-            count = 0
-    if count >= min_frames:
-        region_end = t[-1]
-        sfd_regions.append((region_start, region_end))
+                end_idx = i
+                region_end = t[end_idx]
+                duration = region_end - region_start
 
-    # Require two regions to form a valid message
+                # Spectrum check
+                spec_slice = Sxx[:, start_idx:end_idx]
+                avg_spectrum = spec_slice.mean(axis=1)
+                power_db = 10 * np.log10(avg_spectrum + 1e-10)
+                active_band = f[power_db > power_db.max() - 10]
+                bandwidth = active_band[-1] - active_band[0] if len(active_band) > 1 else 0
+
+                if duration >= min_sfd_duration_sec and bandwidth >= min_bandwidth_hz:
+                    sfd_regions.append((region_start, region_end))
+            count = 0
+
+    if count >= min_frames:
+        end_idx = len(t) - 1
+        region_end = t[end_idx]
+        duration = region_end - region_start
+        spec_slice = Sxx[:, start_idx:]
+        avg_spectrum = spec_slice.mean(axis=1)
+        power_db = 10 * np.log10(avg_spectrum + 1e-10)
+        active_band = f[power_db > power_db.max() - 10]
+        bandwidth = active_band[-1] - active_band[0] if len(active_band) > 1 else 0
+        if duration >= min_sfd_duration_sec and bandwidth >= min_bandwidth_hz:
+            sfd_regions.append((region_start, region_end))
+
     if len(sfd_regions) >= 2:
         s1_start, _ = sfd_regions[0]
         _, s2_end = sfd_regions[1]
