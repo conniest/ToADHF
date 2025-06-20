@@ -42,10 +42,7 @@ class IC7300:
         }
         if mode not in mode_map:
             raise ValueError(f"Unsupported mode: {mode}")
-        mode_str, passband = mode_map[mode]
 
-        # Optional: set a default frequency to help rig accept mode switch
-        self.set_freq(14086430)
         self._rigctl("M", mode)
 
     def ptt_on(self):
