@@ -24,7 +24,7 @@ def detect_sfd_pair_or_fallback(data, fs, band=(350, 3500),
                                 min_sfd_duration_sec=0.22,
                                 min_bandwidth_hz=700,
                                 fallback_duration=1.0,
-                                pad_sec=0.1):
+                                pad_sec=0.15):
     """
     Detect GGWave start/end frame delimiters or fall back to a fixed window if only one is found.
     Returns (start_sample, end_sample) or (None, None).
@@ -140,7 +140,7 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
     frames_per_chunk = int(record_duration * samplerate)
     stream = sd.InputStream(device=device, channels=1, samplerate=samplerate, dtype='float32')
     stream.start()
-
+    ctx = ggwave.init()
     while True:
         if radio.tx_lock.locked():
             time.sleep(0.1)
@@ -162,16 +162,14 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
         # Use filtered audio for detection, unfiltered for decode
         filtered = bandpass_filter(pcm, fs=samplerate)
 
-        start, end = detect_sfd_pair_or_fallback(filtered,kn6ubf samplerate)
+        start, end = detect_sfd_pair_or_fallback(filtered, samplerate)
         if start is not None and end is not None:
             print(f"[ToAD] Detected GGWave burst from {start/samplerate:.2f}s to {end/samplerate:.2f}s")
-            burst = pcm[start:end]
-            pcm_bytes = burst.astype(np.float32).tobytes()
-            start_sample = int(start * 4800)
-            end_sample = int(end * 4800)
-            clip = audio[start_sample:end_sample].astype(np.float32).tobytes()
-            ctx = ggwave.init()
-            result = ggwave.decode(ctx, clip)
+            burst = pcm[start:end] * 2.0  # boost gain like in working snippet
+            print(f"[DEBUG] start={start}, end={end}, len={end - start}")
+            print(f"[DEBUG] dtype={pcm.dtype}, max={np.max(np.abs(pcm[start:end])):.4f}")
+            print(f"[DEBUG] bytes={len(pcm[start:end].astype(np.float32).tobytes())}")
+            result = ggwave.decode(ctx, burst.astype(np.float32).tobytes())
         else:
             print(f"[ToAD] No GGWave SFD detected in {filename}")
 
