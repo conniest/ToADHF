@@ -11,7 +11,6 @@ import os
 import datetime
 from scipy.signal import butter, lfilter, spectrogram
 
-ctx = ggwave.init()
 usb_audio_output_device = "USB Audio CODEC"
 
 import numpy as np
@@ -24,45 +23,48 @@ def detect_sfd_pair_region(data, fs, band=(350, 3500),
                            min_rise_db=10,
                            pad_sec=0.1):
     """
-    Detect the first pair of GGWave SFD bursts and return the full region between them.
-    Applies adaptive power rise detection over a specified frequency band.
+    Detect GGWave start and end delimiter bursts and return the region spanning both.
+    Returns (start_sample, end_sample) or (None, None).
     """
     nperseg = 1024
     noverlap = nperseg // 2
     f, t, Sxx = spectrogram(data, fs=fs, nperseg=nperseg, noverlap=noverlap)
 
+    # Compute band-limited power
     f_mask = (f >= band[0]) & (f <= band[1])
     band_power = Sxx[f_mask].mean(axis=0)
     band_power_db = 10 * np.log10(band_power + 1e-10)
 
+    # Adaptive rise over baseline
     baseline_win = int((baseline_window_sec * fs) / (nperseg - noverlap))
     smoothed_baseline = np.convolve(band_power_db, np.ones(baseline_win) / baseline_win, mode='same')
     delta_db = band_power_db - smoothed_baseline
 
+    # Mark frames where signal rises significantly
     min_frames = int((min_duration_sec / (nperseg / fs)) + 0.5)
     above_delta = delta_db > min_rise_db
 
-    # Find all SFD-like regions
-    sfd_times = []
+    # Identify all SFD/EFD bursts
+    sfd_regions = []
     count = 0
     for i, val in enumerate(above_delta):
         if val:
             count += 1
             if count == min_frames:
-                start_time = t[i - count + 1]
+                region_start = t[i - count + 1]
         else:
             if count >= min_frames:
-                end_time = t[i]
-                sfd_times.append((start_time, end_time))
+                region_end = t[i]
+                sfd_regions.append((region_start, region_end))
             count = 0
-
     if count >= min_frames:
-        end_time = t[-1]
-        sfd_times.append((start_time, end_time))
+        region_end = t[-1]
+        sfd_regions.append((region_start, region_end))
 
-    if len(sfd_times) >= 2:
-        s1_start, _ = sfd_times[0]
-        _, s2_end = sfd_times[1]
+    # Require two regions to form a valid message
+    if len(sfd_regions) >= 2:
+        s1_start, _ = sfd_regions[0]
+        _, s2_end = sfd_regions[1]
         start_sample = max(0, int((s1_start - pad_sec) * fs))
         end_sample = min(len(data), int((s2_end + pad_sec) * fs))
         return start_sample, end_sample
@@ -139,6 +141,7 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
             print(f"[ToAD] Detected GGWave burst from {start/samplerate:.2f}s to {end/samplerate:.2f}s")
             burst = pcm[start:end]
             pcm_bytes = burst.astype(np.float32).tobytes()
+            ctx = ggwave.init()
             result = ggwave.decode(ctx, pcm_bytes)
         else:
             print(f"[ToAD] No GGWave SFD detected in {filename}")

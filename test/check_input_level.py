@@ -9,4 +9,4 @@ def check_input_level(device):
             level = np.abs(data).mean()
             print(f"Volume: {level:.6f}")
 
-check_input_level(2)
+check_input_level("USB Audio CODEC")
