@@ -17,21 +17,22 @@ import numpy as np
 
 
 
-def detect_sfd_pair_region(data, fs, band=(350, 3500),
-                           baseline_window_sec=2.0,
-                           min_duration_sec=0.1,
-                           min_rise_db=10,
-                           min_sfd_duration_sec=0.25,
-                           min_bandwidth_hz=700,
-                           pad_sec=0.1):
+def detect_sfd_pair_or_fallback(data, fs, band=(350, 3500),
+                                baseline_window_sec=2.0,
+                                min_duration_sec=0.1,
+                                min_rise_db=10,
+                                min_sfd_duration_sec=0.22,
+                                min_bandwidth_hz=700,
+                                fallback_duration=1.0,
+                                pad_sec=0.1):
     """
-    Detect GGWave start and end delimiter bursts using adaptive energy rise, duration,
-    and frequency spread. Returns (start_sample, end_sample) or (None, None).
+    Detect GGWave start/end frame delimiters or fall back to a fixed window if only one is found.
+    Returns (start_sample, end_sample) or (None, None).
     """
     from scipy.signal import spectrogram
 
     nperseg = 1024
-    noverlap = nperseg // 2
+    noverlap = 512
     f, t, Sxx = spectrogram(data, fs=fs, nperseg=nperseg, noverlap=noverlap)
 
     f_mask = (f >= band[0]) & (f <= band[1])
@@ -44,8 +45,8 @@ def detect_sfd_pair_region(data, fs, band=(350, 3500),
 
     min_frames = int((min_duration_sec / (nperseg / fs)) + 0.5)
     sfd_regions = []
-
     count = 0
+
     for i, val in enumerate(delta_db > min_rise_db):
         if val:
             count += 1
@@ -58,7 +59,6 @@ def detect_sfd_pair_region(data, fs, band=(350, 3500),
                 region_end = t[end_idx]
                 duration = region_end - region_start
 
-                # Spectrum check
                 spec_slice = Sxx[:, start_idx:end_idx]
                 avg_spectrum = spec_slice.mean(axis=1)
                 power_db = 10 * np.log10(avg_spectrum + 1e-10)
@@ -88,7 +88,14 @@ def detect_sfd_pair_region(data, fs, band=(350, 3500),
         end_sample = min(len(data), int((s2_end + pad_sec) * fs))
         return start_sample, end_sample
 
+    if len(sfd_regions) == 1:
+        s1_start, _ = sfd_regions[0]
+        start_sample = max(0, int((s1_start - pad_sec) * fs))
+        end_sample = min(len(data), int((s1_start + fallback_duration + pad_sec) * fs))
+        return start_sample, end_sample
+
     return None, None
+
 
 def bandpass_filter(data, lowcut=350.0, highcut=3500.0, fs=48000, order=4):
     nyq = 0.5 * fs
@@ -155,13 +162,16 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
         # Use filtered audio for detection, unfiltered for decode
         filtered = bandpass_filter(pcm, fs=samplerate)
 
-        start, end = detect_sfd_pair_region(filtered, samplerate)
+        start, end = detect_sfd_pair_or_fallback(filtered,kn6ubf samplerate)
         if start is not None and end is not None:
             print(f"[ToAD] Detected GGWave burst from {start/samplerate:.2f}s to {end/samplerate:.2f}s")
             burst = pcm[start:end]
             pcm_bytes = burst.astype(np.float32).tobytes()
+            start_sample = int(start * 4800)
+            end_sample = int(end * 4800)
+            clip = audio[start_sample:end_sample].astype(np.float32).tobytes()
             ctx = ggwave.init()
-            result = ggwave.decode(ctx, pcm_bytes)
+            result = ggwave.decode(ctx, clip)
         else:
             print(f"[ToAD] No GGWave SFD detected in {filename}")
 
