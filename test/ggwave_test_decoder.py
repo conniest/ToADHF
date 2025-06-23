@@ -53,7 +53,7 @@ def detect_start_frame(spectrogram, freqs):
     raise RuntimeError("Failed to detect valid start of symbol sequence")
 
 
-def extract_symbol_frames(spectrogram, freqs, start_frame, max_symbols=64):
+def extract_symbol_frames(spectrogram, freqs, start_frame, max_symbols=256):
     tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + i * GGWAVE_FREQ_STEP))) for i in range(GGWAVE_NUM_TONES)]
     symbol_frames = []
     for sym_idx in range(max_symbols):
@@ -129,7 +129,7 @@ def main():
     bits = binarize_symbol_frames(symbol_frames)
 
     dump_bits(bits)
-    decode_audiblefast_bitstrings(bits)
+    #decode_audiblefast_bitstrings(bits)
 
     print("[TODO] Feed bit matrix into Reed-Solomon decoder to recover payload")
 

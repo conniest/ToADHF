@@ -61,9 +61,6 @@ class IC7300:
             audio_callback()
             self.ptt_off()
 
-
-import threading
-
 class MockIC7300:
     def __init__(self, device="/dev/cu.SLAB_USBtoUART", model=3073, baud=115200):
         self.device = device
@@ -113,6 +110,67 @@ class MockIC7300:
         with self.tx_lock:
             self.ptt_on()
             print("[MOCK] Playing audio...")
+            audio_callback()
+            self.ptt_off()
+
+
+class K3S:
+    def __init__(self, device="/dev/ttyUSB0", model=2043, baud=38400):
+        self.device = device
+        self.model = model  # 229 is the Hamlib model for Elecraft K3/K3S
+        self.baud = baud
+        self.tx_lock = threading.Lock()
+
+    def _rigctl(self, *args):
+        cmd = [
+            "rigctl",
+            "-m", str(self.model),
+            "-r", self.device,
+            "-s", str(self.baud),
+            *args
+        ]
+        subprocess.run(cmd, check=True)
+
+    def enable_sidetone(self, level=1.0):
+        """Enable sidetone or monitor audio if available (Elecraft may not support this directly)."""
+        try:
+            self._rigctl("l", "MONITOR_GAIN", str(level))
+        except subprocess.CalledProcessError:
+            print("Monitor gain setting not supported on K3S.")
+
+    def set_freq(self, freq_hz):
+        """Set operating frequency."""
+        self._rigctl("F", str(freq_hz))
+
+    def set_mode(self, mode):
+        """Set mode and bandwidth if supported."""
+        mode_map = {
+            "USB": ("USB", "2400"),
+            "LSB": ("LSB", "2400"),
+            "CW": ("CW", "500"),
+            "CW-R": ("CW-R", "500"),
+            "RTTY": ("RTTY", "300"),
+            "DATA": ("DATA", "2400"),
+        }
+        if mode not in mode_map:
+            raise ValueError(f"Unsupported mode: {mode}")
+
+        self._rigctl("M", mode_map[mode][0])
+        # Elecraft K3 supports custom filter widths, but setting bandwidth may not work with rigctl
+
+    def ptt_on(self):
+        self._rigctl("T", "1")
+
+    def ptt_off(self):
+        self._rigctl("T", "0")
+
+    def close(self):
+        pass  # Nothing to close for rigctl
+
+    def transmit_audio_block(self, audio_callback):
+        """Key PTT, call audio_callback() to play audio, then unkey."""
+        with self.tx_lock:
+            self.ptt_on()
             audio_callback()
             self.ptt_off()
 

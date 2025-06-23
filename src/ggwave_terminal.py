@@ -1,5 +1,5 @@
 # ggwave_terminal.py
-from radio_common import IC7300
+from radio_common import IC7300, K3S
 from ggwave_decoder import our_decode
 
 import ggwave
@@ -196,8 +196,8 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
         else:
             print(f"[ToAD] No decode from {filename}")
 def main():
-    radio = IC7300()
-    radio.set_mode('USB-D')
+    radio = K3S()
+    radio.set_mode('LSB')
 
     # Optional: set sounddevice defaults
     # sd.default.device = (None, usb_audio_output_device)  # (output, input)

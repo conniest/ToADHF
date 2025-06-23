@@ -74,7 +74,7 @@ def decode_wav_snippet(path, start_s=3.3, end_s=4.83, protocol_id=1):
     sf.write("recordings/test.wav", pcm, sr)
 
     # Write known-good reference GGWave encoding
-    encoded = ggwave.encode("kn6ubf")
+    encoded = ggwave.encode(" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-,.!?@$#")
     samples = np.frombuffer(encoded, dtype=np.float32)
     sf.write("recordings/from_encode.wav", samples, 48000)
 
