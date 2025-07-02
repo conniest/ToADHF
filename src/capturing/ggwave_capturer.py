@@ -137,7 +137,7 @@ def detect_ggwave_region(data, fs, window_ms=100, threshold=0.005):
 
 def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
     record_duration = 5.0  # seconds per chunk
-    output_dir = "/home/glick/Desktop/CATpack/src/recordings/chars"
+    output_dir = "/home/glick/Desktop/CATpack/src/capturing/recordings/chars"
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"[ToAD] Listening on '{device}' – saving {record_duration}s chunks to disk")
@@ -201,7 +201,11 @@ def main():
     radio = IC7300()
     radio.set_mode('LSB-D')
     samplerate = 48000
-    record_duration = 3.0  # seconds
+
+    # how much silence to pad before/after each burst
+    pre_silence  = 0.5  # seconds
+    post_silence = 0.5  # seconds
+
     output_dir = "recordings/chars"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -209,65 +213,58 @@ def main():
         for ch in GGWAVE_CODEBOOK.keys():
             print(f"[ToAD] Preparing character '{ch}'")
 
-            # Encode GGWave signal
+            # --- build the GGWave payload ---
             text = ch * 10
             payload = ggwave.encode(text.encode(), protocolId=1)
             samples = np.frombuffer(payload, dtype=np.float32)
-            padding = np.zeros(int(0.25 * samplerate), dtype=np.float32)
-            padded = np.concatenate([padding, samples, padding])
 
-            # Start recording BEFORE transmission
-            print("[ToAD] Starting recording...")
-            recording = sd.rec(int(record_duration * samplerate),
-                               samplerate=samplerate, channels=1,
-                               dtype='float32', device=usb_audio_output_device)
+            # pad it so we always record even with driver latency
+            pre  = np.zeros(int(pre_silence  * samplerate), dtype=np.float32)
+            post = np.zeros(int(post_silence * samplerate), dtype=np.float32)
+            outbuf = np.concatenate([pre, samples, post])
 
-            time.sleep(0.25)  # give a little lead-in
+            # --- key transmitter and do full-duplex play/rec ---
+            radio.ptt_on()
+            inbuf = sd.playrec(outbuf,
+                               samplerate=samplerate,
+                               device=usb_audio_output_device,  # your USB codec
+                               channels=1,
+                               dtype='float32')
+            sd.wait()       # wait for both play and record to finish
+            radio.ptt_off()
 
-            # Transmit
-            with radio.tx_lock:
-                radio.ptt_on()
-                sd.play(padded, samplerate=samplerate, device=usb_audio_output_device)
-                sd.wait()
-                radio.ptt_off()
-            print("[ToAD] Transmission complete")
+            pcm = inbuf[:, 0]  # recorded mono
 
-            # Wait until recording ends
-            sd.wait()
-            print("[ToAD] Recording complete")
-
-            pcm = recording[:, 0]
+            # --- save the raw capture ---
             filename = os.path.join(output_dir, f"toad_{ch}.wav")
             sf.write(filename, pcm, samplerate)
             print(f"[ToAD] Saved → {filename}")
 
-            # Detect and decode
+            # --- detect & decode exactly where the burst landed ---
             start, end = detect_sfd_pair_or_fallback(pcm, samplerate)
             if start is not None and end is not None:
                 print(f"[ToAD] Detected GGWave burst from {start/samplerate:.2f}s to {end/samplerate:.2f}s")
-
                 clip = pcm[start:end]
-                max_val = np.max(np.abs(clip))
-                if max_val > 0:
-                    clip = clip / max_val * 0.9
+                clip = clip / np.max(np.abs(clip)) * 0.9
 
                 params = ggwave.getDefaultParameters()
                 params["sampleRateInp"] = samplerate
-                params["sampleRate"] = samplerate
-                #ctx = ggwave.init(params)
-
-                #result = ggwave.decode(ctx, clip.astype(np.float32).tobytes())
-                #if result:
-                #    print(f"\n[RECV] {result}\n> ", end='', flush=True)
-                #else:
-                #    print(f"[ToAD] GGWave decode failed")
+                params["sampleRate"]    = samplerate
+                ctx = ggwave.init(params)
+                result = ggwave.decode(ctx, clip.astype(np.float32).tobytes())
+                if result:
+                    print(f"\n[RECV] {result}\n")
+                else:
+                    print("[ToAD] GGWave decode failed")
             else:
-                print(f"[ToAD] No GGWave burst detected")
+                print("[ToAD] No GGWave burst detected")
 
             time.sleep(2.0)
 
     finally:
         radio.close()
+
+
 
 
 if __name__ == '__main__':
