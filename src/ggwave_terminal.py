@@ -1,6 +1,6 @@
 # ggwave_terminal.py
 from radio_common import IC7300, K3S
-from ggwave_decoder import our_decode
+from ggwave_decoder import decode_wav_file, decode_wav_file_multi
 
 import ggwave
 import threading
@@ -11,7 +11,7 @@ import time
 import collections
 import os
 import datetime
-from scipy.signal import butter, lfilter, spectrogram
+from scipy.signal import butter, lfilter, spectrogram 
 
 usb_audio_output_device = "USB Audio CODEC"
 
@@ -134,11 +134,11 @@ def detect_ggwave_region(data, fs, window_ms=100, threshold=0.005):
 
 
 def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
-    record_duration = 5.0  # seconds per chunk
+    record_duration = 10.0  # seconds per chunk
     output_dir = "recordings"
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"[ToAD] Listening on '{device}' – saving {record_duration}s chunks to disk")
+    print(f"[ToAD] Listening on {radio} ('{device}')")
 
     frames_per_chunk = int(record_duration * samplerate)
     stream = sd.InputStream(device=device, channels=1, samplerate=samplerate, dtype='float32')
@@ -151,7 +151,7 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
         #     time.sleep(0.1)
         #     continue
 
-        print("[ToAD] Capturing audio chunk...")
+        #print("[ToAD] Capturing audio chunk...")
         audio, _ = stream.read(frames_per_chunk)
 
         filename = os.path.join(
@@ -159,7 +159,7 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
             f"toad_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
         )
         sf.write(filename, audio, samplerate)
-        print(f"[ToAD] Saved → {filename}")
+        #print(f"[ToAD] Saved → {filename}")
 
         pcm = audio[:, 0].astype(np.float32)  # mono
 
@@ -167,34 +167,15 @@ def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
         start, end = detect_sfd_pair_or_fallback(pcm, samplerate)
         result = None
 
-        if start is not None and end is not None:
-            print(f"[ToAD] Detected GGWave burst from {start/samplerate:.2f}s to {end/samplerate:.2f}s")
-
-            clip = pcm[start:end]
-
-            # Normalize to peak = 0.9
-            max_val = np.max(np.abs(clip))
-            if max_val > 0:
-                clip = clip / max_val * 0.9
-
-            print(f"[DEBUG] start={start}, end={end}, len={end - start}")
-            print(f"[DEBUG] dtype={clip.dtype}, max={np.max(np.abs(clip)):.4f}")
-            print(f"[DEBUG] bytes={len(clip.astype(np.float32).tobytes())}")
-            #result = our_decode(clip.astype(np.float32))
-            params = ggwave.getDefaultParameters()
-            print(params)
-            params["sampleRateInp"] = 48000.0     # Confirm this is your USB CODEC rate
-            params["sampleRate"] = 48000.0        # Keep consistent
-            params["soundMarkerThreshold"] = 2.5  # Try lowering if burst isn't detected reliably
-            ctx = ggwave.init(params)
-            result = ggwave.decode(ctx, clip.astype(np.float32).tobytes())
-        else:
-            print(f"[ToAD] No GGWave SFD detected in {filename}")
+        try:
+            result = decode_wav_file(filename)
+        except RuntimeError:
+            print(f"[ToAD] No Decode from last {record_duration} sec")
 
         if result:
             print(f"\n[RECV] {result}\n> ", end='', flush=True)
         else:
-            print(f"[ToAD] No decode from {filename}")
+            print(f"[ToAD] No Decode from last {record_duration} sec")
 def main():
     radio = IC7300()
     radio.set_mode('LSB-D')
@@ -204,10 +185,10 @@ def main():
 
     rx_thread = threading.Thread(target=listen_loop, args=(radio,), daemon=True)
     rx_thread.start()
-
+    time.sleep(0.5)
     try:
         while True:
-            text = input("> ")
+            text = input("[SEND] > ").upper()
             payload = ggwave.encode( text.encode(), protocolId=1)
             with radio.tx_lock:
                 radio.ptt_on()

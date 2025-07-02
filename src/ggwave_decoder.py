@@ -1,55 +1,291 @@
 import numpy as np
-from scipy.signal import spectrogram
+import scipy.io.wavfile as wav
+import scipy.signal
+import sys
 
-# AudibleFast protocol parameters
-FREQ_START = 420.0       # Base frequency in Hz
-FREQ_STEP = 18.0         # Step between tones in Hz
-NUM_SYMBOLS = 212        # Number of distinct tones
-SYMBOL_RATE = 20         # Symbols per second (roughly)
-
-# Real GGWave Golay codewords for printable ASCII characters (32–126)
-# Extracted from GGWave source: ggwave-common.h and protocol.cpp
-# These are 12-bit values encoded with Golay(23,12) for error correction
-CHAR_TO_CODEWORD = {
-    32: 0x000, 33: 0x001, 34: 0x002, 35: 0x003, 36: 0x004, 37: 0x005, 38: 0x006, 39: 0x007,
-    40: 0x008, 41: 0x009, 42: 0x00A, 43: 0x00B, 44: 0x00C, 45: 0x00D, 46: 0x00E, 47: 0x00F,
-    48: 0x010, 49: 0x011, 50: 0x012, 51: 0x013, 52: 0x014, 53: 0x015, 54: 0x016, 55: 0x017,
-    56: 0x018, 57: 0x019, 58: 0x01A, 59: 0x01B, 60: 0x01C, 61: 0x01D, 62: 0x01E, 63: 0x01F,
-    64: 0x020, 65: 0x021, 66: 0x022, 67: 0x023, 68: 0x024, 69: 0x025, 70: 0x026, 71: 0x027,
-    72: 0x028, 73: 0x029, 74: 0x02A, 75: 0x02B, 76: 0x02C, 77: 0x02D, 78: 0x02E, 79: 0x02F,
-    80: 0x030, 81: 0x031, 82: 0x032, 83: 0x033, 84: 0x034, 85: 0x035, 86: 0x036, 87: 0x037,
-    88: 0x038, 89: 0x039, 90: 0x03A, 91: 0x03B, 92: 0x03C, 93: 0x03D, 94: 0x03E, 95: 0x03F,
-    96: 0x040, 97: 0x041, 98: 0x042, 99: 0x043, 100: 0x044, 101: 0x045, 102: 0x046, 103: 0x047,
-    104: 0x048, 105: 0x049, 106: 0x04A, 107: 0x04B, 108: 0x04C, 109: 0x04D, 110: 0x04E, 111: 0x04F,
-    112: 0x050, 113: 0x051, 114: 0x052, 115: 0x053, 116: 0x054, 117: 0x055, 118: 0x056, 119: 0x057,
-    120: 0x058, 121: 0x059, 122: 0x05A, 123: 0x05B, 124: 0x05C, 125: 0x05D, 126: 0x05E
-}
-
-# Build symbol-to-character lookup by assigning each codeword to one tone index
-CODEWORD_TO_CHAR = {v: chr(k) for k, v in CHAR_TO_CODEWORD.items()}
+# === FFT Parameters ===
+FFT_SIZE = 1024
+HOP_SIZE = FFT_SIZE / 3.55          # 256 samples → 48000/256 ≈ 187.5 Hz
+WINDOW   = np.hanning(FFT_SIZE)
 
 
-def our_decode(audio, samplerate=48000):
+# === GGWave AudibleFast Parameters ===
+GGWAVE_SAMPLE_RATE       = 48000
+# STFT update rate = 48000/256 ≈ 187.5 Hz → to get 2 frames/symbol:
+GGWAVE_SYMBOL_RATE       = int(round( (GGWAVE_SAMPLE_RATE/HOP_SIZE) / 2 ))
+GGWAVE_NUM_TONES         = 25
+GGWAVE_FREQ_MIN          = 1875.0
+GGWAVE_FREQ_STEP         = 46.875
+GGWAVE_SYMBOL_DURATION_S = 1.0 / GGWAVE_SYMBOL_RATE
+GGWAVE_SYMBOL_HOP_FRAMES = 2     # exactly 2 STFT‐columns per symbol
+
+# === Codebook Definitions ===
+from ggwave_alphabet import TEXT_TO_GGWAVE, GGWAVE_TO_TEXT
+
+# === Spectrogram & I/O ===
+def compute_spectrogram(waveform, rate):
+    _, _, spec = scipy.signal.stft(
+        waveform, fs=rate, nperseg=FFT_SIZE,
+        noverlap=FFT_SIZE - HOP_SIZE, window=WINDOW,
+        padded=False, boundary=None)
+    return np.abs(spec)
+
+
+def load_wav(filename):
+    rate, data = wav.read(filename)
+    if data.ndim > 1:
+        data = data[:, 0]
+    return rate, data.astype(np.float32)
+
+# === Boundary Detection ===
+def detect_start_frame(spectrogram, freqs):
     """
-    GGWave AudibleFast decoder using codeword mapping (no error correction).
-    Returns: decoded string or None
+    Find first column where at least 3 consecutive frames exceed threshold
+    AND the first two frames have an all-ones tone pattern.
+    Returns (index, energy, threshold, min_idx, max_idx).
     """
-    nperseg = 1024
-    noverlap = 512
-    f, t, Sxx = spectrogram(audio, fs=samplerate, nperseg=nperseg, noverlap=noverlap)
+    # locate frequency bin range for GGWave tones
+    min_idx = np.argmin(np.abs(freqs - GGWAVE_FREQ_MIN))
+    max_idx = np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + GGWAVE_FREQ_STEP * (GGWAVE_NUM_TONES - 1))))
+    energy = np.sum(spectrogram[min_idx:max_idx+1, :], axis=0)
+    threshold = 0.5 * np.mean(energy)
+    # precompute exact tone-bin indices
+    tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + j * GGWAVE_FREQ_STEP)))
+                 for j in range(GGWAVE_NUM_TONES)]
+    # helper to compute bit pattern for a given STFT column
+    def frame_bits(col):
+        energies = np.array([
+            np.sum(spectrogram[max(0, b-1):min(b+2, spectrogram.shape[0]), col])
+            for b in tone_bins
+        ])
+        max_e = np.max(energies)
+        return (energies > 0.5 * max_e).astype(np.uint8)
 
-    valid_bins = (f >= FREQ_START - 2 * FREQ_STEP) & (f <= FREQ_START + FREQ_STEP * NUM_SYMBOLS)
-    f = f[valid_bins]
-    Sxx = Sxx[valid_bins, :]
+    all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
+    # scan for 3 high-energy in a row
+    for i in range(len(energy) - 2):
+        if (energy[i] > threshold and energy[i+1] > threshold and energy[i+2] > threshold):
+            # require exact all-ones pattern in first two frames
+            bits0 = frame_bits(i)
+            bits1 = frame_bits(i+1)
+            bits2 = frame_bits(i+2)
+            if np.array_equal(bits0, all_ones) and np.array_equal(bits1, all_ones) and np.array_equal(bits2, all_ones):
+                #print(f"[INFO] SFD starts at column {i}")
+                return i, energy, threshold, min_idx, max_idx
+    raise RuntimeError("No valid SFD found (need 3 consecutive high-energy frames with first two all-ones)")
 
-    peak_freqs = f[np.argmax(Sxx, axis=0)]
-    symbol_indices = np.round((peak_freqs - FREQ_START) / FREQ_STEP).astype(int)
 
-    decoded_chars = []
-    for idx in symbol_indices:
-        if 0 <= idx < NUM_SYMBOLS:
-            # Map index to Golay codeword and back to character
-            if idx in CODEWORD_TO_CHAR:
-                decoded_chars.append(CODEWORD_TO_CHAR[idx])
+def detect_end_frame(spectrogram, freqs, energy, threshold, min_idx, max_idx):
+    """
+    Find last column where at least 3 consecutive frames (backwards) exceed threshold.
+    Returns index of the last high-energy column in that run.
+    """
+    for i in range(len(energy) - 1, 1, -1):
+        if energy[i] > threshold and energy[i-1] > threshold and energy[i-2] > threshold:
+            #print(f"[INFO] EFD ends at column {i}")
+            return i
+    raise RuntimeError("No valid EFD found (need 3 consecutive high-energy frames)")
 
-    return ''.join(decoded_chars) if decoded_chars else None
+# === Binarization & Trimming ===
+def binarize_symbol_frames(symbol_frames, threshold_ratio=0.5):
+    bits = []
+    for frame in symbol_frames:
+        max_e = np.max(frame)
+        bits.append((frame > (threshold_ratio * max_e)).astype(np.uint8))
+    return np.array(bits)
+
+
+def trim_and_binarize_between(spectrogram, freqs, metadata_frames=11, threshold_ratio=0.5):
+    start, energy, thresh, mi, ma = detect_start_frame(spectrogram, freqs)
+    end = detect_end_frame(spectrogram, freqs, energy, thresh, mi, ma)
+    idxs = list(range(start, end+1, GGWAVE_SYMBOL_HOP_FRAMES))
+    tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + i * GGWAVE_FREQ_STEP)))
+                 for i in range(GGWAVE_NUM_TONES)]
+    frames = []
+    for t in idxs:
+        frames.append(np.array([
+            np.sum(spectrogram[max(0, b-1):min(b+2, spectrogram.shape[0]), t])
+            for b in tone_bins]))
+    bits_all = binarize_symbol_frames(np.array(frames), threshold_ratio)
+    sfd_pat = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
+    is_data = np.any(bits_all != sfd_pat, axis=1)
+    first_d = np.argmax(is_data)
+    last_d = len(is_data)-1 - np.argmax(is_data[::-1])
+    start_p = first_d + metadata_frames
+    end_p = last_d - metadata_frames
+    return bits_all[start_p:end_p]
+
+# === Decoding Helpers ===
+def decode_payload_runs(bits):
+    bitstrs = [''.join(str(x) for x in frame) for frame in bits]
+    chars = [GGWAVE_TO_TEXT.get(bs, '?') for bs in bitstrs]
+    runs, prev, count = [], chars[0], 1
+    for c in chars[1:]:
+        if c == prev:
+            count += 1
+        else:
+            runs.append(count)
+            prev, count = c, 1
+    runs.append(count)
+    return runs
+
+
+def estimate_frames_per_char(runs):
+    return int(np.median(runs))
+
+
+# === Fuzzy Decode ===
+def decode_message_fuzzy(bits, frames_per_char=4):
+    """
+    Perform a majority-vote across each block of `frames_per_char` frames.
+    If one symbol wins >50%, pick it. If a 2-2 tie, return both as "[a|b]".
+    """
+    bitstrs = [''.join(str(x) for x in frame) for frame in bits]
+    total = len(bitstrs)
+    char_count = total // frames_per_char
+    decoded = []
+    for i in range(char_count):
+        slice_ = bitstrs[i*frames_per_char:(i+1)*frames_per_char]
+        # map each frame to char
+        chars = [GGWAVE_TO_TEXT.get(bs, '?') for bs in slice_]
+        # count votes
+        votes = {}
+        for c in chars:
+            votes[c] = votes.get(c, 0) + 1
+        # find winners
+        max_votes = max(votes.values())
+        winners = [c for c, v in votes.items() if v == max_votes]
+        if len(winners) == 1:
+            decoded.append(winners[0])
+        else:
+            # tie -> list both
+            decoded.append("[" + "|".join(sorted(winners)) + "]")
+    return ''.join(decoded)
+
+
+# === Utility: Frame/Sample Calculators ===
+def calc_hop_size_for_target_frames(target_frames, sample_rate=GGWAVE_SAMPLE_RATE, symbol_rate=GGWAVE_SYMBOL_RATE):
+    return int(sample_rate / (symbol_rate * target_frames))
+
+
+def calc_sample_rate_for_target_frames(target_frames, hop_size=HOP_SIZE, symbol_rate=GGWAVE_SYMBOL_RATE):
+    return int(hop_size * symbol_rate * target_frames)
+
+# === Programmatic interface ===
+def decode_wav_file(filename, frames_per_char=4):
+    """
+    Load a WAV file and run the full GGWave fuzzy decoder pipeline,
+    returning the decoded message string.
+    """
+    # load audio
+    rate, waveform = load_wav(filename)
+    if rate != GGWAVE_SAMPLE_RATE:
+        print(f"Warning: sample rate {rate} != expected {GGWAVE_SAMPLE_RATE}")
+    # compute spectrogram
+    spec = compute_spectrogram(waveform, rate)
+    freqs = np.fft.rfftfreq(FFT_SIZE, d=1.0/rate)
+    # trim and binarize payload
+    bits = trim_and_binarize_between(spec, freqs)
+    #for i, b in enumerate(bits):
+    #    print(f"[DEBUG] {i}: {''.join(str(x) for x in b)}")
+    # fuzzy-decode message
+    msg = decode_message_fuzzy(bits, frames_per_char)
+    if msg:
+        return msg
+    return None
+
+# === Multi-Transmission Decode API ===
+def decode_wav_file_multi(filename, frames_per_char=4, metadata_frames=11):
+    """
+    Load a WAV file and decode all GGWave bursts within it.
+    Returns a list of decoded message strings.
+    """
+    rate, waveform = load_wav(filename)
+    if rate != GGWAVE_SAMPLE_RATE:
+        print(f"Warning: sample rate {rate} != expected {GGWAVE_SAMPLE_RATE}")
+    # Compute spectrogram & frequency bins
+    spec = compute_spectrogram(waveform, rate)
+    freqs = np.fft.rfftfreq(FFT_SIZE, d=1.0/rate)
+
+    # Energy & threshold
+    min_idx = np.argmin(np.abs(freqs - GGWAVE_FREQ_MIN))
+    max_idx = np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + GGWAVE_FREQ_STEP*(GGWAVE_NUM_TONES-1))))
+    energy = np.sum(spec[min_idx:max_idx+1, :], axis=0)
+    threshold = 0.5 * np.mean(energy)
+
+    # Helper: bit pattern for each column
+    tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + j*GGWAVE_FREQ_STEP))) for j in range(GGWAVE_NUM_TONES)]
+    def frame_bits(col):
+        en = np.array([np.sum(spec[max(0,b-1):min(b+2,spec.shape[0]), col]) for b in tone_bins])
+        return (en > 0.5 * np.max(en)).astype(np.uint8)
+    all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
+
+    # Detect delimiter runs (>=3 consecutive all-ones frames)
+    high = energy > threshold
+    runs = []
+    i = 0
+    while i < len(high):
+        if high[i]:
+            j = i
+            while j < len(high) and high[j]:
+                j += 1
+            if (j - i) >= 3 and all(np.array_equal(frame_bits(k), all_ones) for k in (i, i+1, i+2)):
+                runs.append((i, j-1))
+            i = j
+        else:
+            i += 1
+
+    # Pair runs and decode each segment
+    messages = []
+    for k in range(0, len(runs), 2):
+        if k+1 >= len(runs):
+            break
+        s0, _ = runs[k]
+        _, e1 = runs[k+1]
+        # Extract and trim frames between s0 and e1
+        idxs = list(range(s0, e1+1, GGWAVE_SYMBOL_HOP_FRAMES))
+        frames = [np.array([np.sum(spec[max(0,b-1):min(b+2,spec.shape[0]), t]) for b in tone_bins])
+                  for t in idxs]
+        bits_all = binarize_symbol_frames(np.array(frames))
+        sfd_pat = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
+        data_mask = np.any(bits_all != sfd_pat, axis=1)
+        first_d = np.argmax(data_mask)
+        last_d = len(data_mask) - 1 - np.argmax(data_mask[::-1])
+        start_p = first_d + metadata_frames
+        end_p = last_d - metadata_frames
+        payload = bits_all[start_p:end_p]
+        messages.append(decode_message_fuzzy(payload, frames_per_char))
+
+    return messages
+
+
+# === Main ===
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <input.wav>")
+        sys.exit(1)
+
+    target = 4
+    hop_needed = calc_hop_size_for_target_frames(target)
+    rate_needed = calc_sample_rate_for_target_frames(target)
+    #print(f"For ~{target} frames/symbol at {GGWAVE_SAMPLE_RATE}Hz, HOP_SIZE≈{hop_needed}")
+    #print(f"Or keep HOP_SIZE={HOP_SIZE} and use sample rate≈{rate_needed}Hz")
+
+    rate, wavf = load_wav(sys.argv[1])
+    if rate != GGWAVE_SAMPLE_RATE:
+        print(f"Warning: input rate {rate} != expected {GGWAVE_SAMPLE_RATE}")
+    spec = compute_spectrogram(wavf, rate)
+    freqs = np.fft.rfftfreq(FFT_SIZE, d=1.0/rate)
+
+    bits = trim_and_binarize_between(spec, freqs)
+    for i, b in enumerate(bits):
+        print(f"[DEBUG] {i}: {''.join(str(x) for x in b)}")
+
+    #runs = decode_payload_runs(bits)
+    fpc = 4
+    msg = decode_message_fuzzy(bits, fpc)
+    print(f"Frames/char: {fpc}")
+    print(f"Decoded: {msg}")
+
+if __name__ == '__main__':
+    main()

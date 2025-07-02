@@ -87,23 +87,52 @@ def load_wav(filename):
 
 # === Boundary Detection ===
 def detect_start_frame(spectrogram, freqs):
+    """
+    Find first column where at least 3 consecutive frames exceed threshold
+    AND the first two frames have an all-ones tone pattern.
+    Returns (index, energy, threshold, min_idx, max_idx).
+    """
+    # locate frequency bin range for GGWave tones
     min_idx = np.argmin(np.abs(freqs - GGWAVE_FREQ_MIN))
     max_idx = np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + GGWAVE_FREQ_STEP * (GGWAVE_NUM_TONES - 1))))
     energy = np.sum(spectrogram[min_idx:max_idx+1, :], axis=0)
     threshold = 0.5 * np.mean(energy)
-    for i, e in enumerate(energy):
-        if e > threshold:
-            print(f"[INFO] SFD at column {i}")
-            return i, energy, threshold, min_idx, max_idx
-    raise RuntimeError("No valid SFD found")
+    # precompute exact tone-bin indices
+    tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + j * GGWAVE_FREQ_STEP)))
+                 for j in range(GGWAVE_NUM_TONES)]
+    # helper to compute bit pattern for a given STFT column
+    def frame_bits(col):
+        energies = np.array([
+            np.sum(spectrogram[max(0, b-1):min(b+2, spectrogram.shape[0]), col])
+            for b in tone_bins
+        ])
+        max_e = np.max(energies)
+        return (energies > 0.5 * max_e).astype(np.uint8)
+
+    all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
+    # scan for 3 high-energy in a row
+    for i in range(len(energy) - 2):
+        if (energy[i] > threshold and energy[i+1] > threshold and energy[i+2] > threshold):
+            # require exact all-ones pattern in first two frames
+            bits0 = frame_bits(i)
+            bits1 = frame_bits(i+1)
+            bits2 = frame_bits(i+2)
+            if np.array_equal(bits0, all_ones) and np.array_equal(bits1, all_ones) and np.array_equal(bits2, all_ones):
+                print(f"[INFO] SFD starts at column {i}")
+                return i, energy, threshold, min_idx, max_idx
+    raise RuntimeError("No valid SFD found (need 3 consecutive high-energy frames with first two all-ones)")
 
 
 def detect_end_frame(spectrogram, freqs, energy, threshold, min_idx, max_idx):
-    for i in range(len(energy)-1, -1, -1):
-        if energy[i] > threshold:
-            print(f"[INFO] EFD at column {i}")
+    """
+    Find last column where at least 3 consecutive frames (backwards) exceed threshold.
+    Returns index of the last high-energy column in that run.
+    """
+    for i in range(len(energy) - 1, 1, -1):
+        if energy[i] > threshold and energy[i-1] > threshold and energy[i-2] > threshold:
+            print(f"[INFO] EFD ends at column {i}")
             return i
-    raise RuntimeError("No valid EFD found")
+    raise RuntimeError("No valid EFD found (need 3 consecutive high-energy frames)")
 
 # === Binarization & Trimming ===
 def binarize_symbol_frames(symbol_frames, threshold_ratio=0.5):
@@ -132,7 +161,7 @@ def trim_and_binarize_between(spectrogram, freqs, metadata_frames=11, threshold_
     last_d = len(is_data)-1 - np.argmax(is_data[::-1])
     start_p = first_d + metadata_frames
     end_p = last_d - metadata_frames
-    return bits_all[start_p+1:end_p-1]
+    return bits_all[start_p:end_p]
 
 # === Decoding Helpers ===
 def decode_payload_runs(bits):
@@ -153,14 +182,34 @@ def estimate_frames_per_char(runs):
     return int(np.median(runs))
 
 
-def decode_message(bits, frames_per_char):
+# === Fuzzy Decode ===
+def decode_message_fuzzy(bits, frames_per_char=4):
+    """
+    Perform a majority-vote across each block of `frames_per_char` frames.
+    If one symbol wins >50%, pick it. If a 2-2 tie, return both as "[a|b]".
+    """
     bitstrs = [''.join(str(x) for x in frame) for frame in bits]
-    n = len(bitstrs) // frames_per_char
-    msg = []
-    for i in range(n):
-        pat = bitstrs[i * frames_per_char]
-        msg.append(GGWAVE_TO_TEXT.get(pat, '?'))
-    return ''.join(msg)
+    total = len(bitstrs)
+    char_count = total // frames_per_char
+    decoded = []
+    for i in range(char_count):
+        slice_ = bitstrs[i*frames_per_char:(i+1)*frames_per_char]
+        # map each frame to char
+        chars = [GGWAVE_TO_TEXT.get(bs, '?') for bs in slice_]
+        # count votes
+        votes = {}
+        for c in chars:
+            votes[c] = votes.get(c, 0) + 1
+        # find winners
+        max_votes = max(votes.values())
+        winners = [c for c, v in votes.items() if v == max_votes]
+        if len(winners) == 1:
+            decoded.append(winners[0])
+        else:
+            # tie -> list both
+            decoded.append("[" + "|".join(sorted(winners)) + "]")
+    return ''.join(decoded)
+
 
 # === Utility: Frame/Sample Calculators ===
 def calc_hop_size_for_target_frames(target_frames, sample_rate=GGWAVE_SAMPLE_RATE, symbol_rate=GGWAVE_SYMBOL_RATE):
@@ -194,7 +243,7 @@ def main():
 
     #runs = decode_payload_runs(bits)
     fpc = 4
-    msg = decode_message(bits, fpc)
+    msg = decode_message_fuzzy(bits, fpc)
     print(f"Frames/char: {fpc}")
     print(f"Decoded: {msg}")
 
