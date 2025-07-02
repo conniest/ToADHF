@@ -137,7 +137,7 @@ def detect_ggwave_region(data, fs, window_ms=100, threshold=0.005):
 
 def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
     record_duration = 5.0  # seconds per chunk
-    output_dir = "/home/glick/Desktop/CATpack/src/capturing/recordings/chars"
+    output_dir = "/home/glick/Desktop/CATpack/src/recordings/chars"
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"[ToAD] Listening on '{device}' – saving {record_duration}s chunks to disk")
@@ -218,22 +218,25 @@ def main():
             payload = ggwave.encode(text.encode(), protocolId=1)
             samples = np.frombuffer(payload, dtype=np.float32)
 
-            # pad it so we always record even with driver latency
+            # pad it so we always record even with latency
             pre  = np.zeros(int(pre_silence  * samplerate), dtype=np.float32)
             post = np.zeros(int(post_silence * samplerate), dtype=np.float32)
-            outbuf = np.concatenate([pre, samples, post])
+            outbuf = np.concatenate([pre, samples, post]).reshape(-1, 1)
 
-            # --- key transmitter and do full-duplex play/rec ---
-            radio.ptt_on()
-            inbuf = sd.playrec(outbuf,
-                               samplerate=samplerate,
-                               device=usb_audio_output_device,  # your USB codec
-                               channels=1,
-                               dtype='float32')
-            sd.wait()       # wait for both play and record to finish
-            radio.ptt_off()
+            # --- open a full-duplex stream on the USB codec ---
+            with sd.Stream(device=(usb_audio_output_device, usb_audio_output_device),
+                           samplerate=samplerate,
+                           channels=1,
+                           dtype='float32',
+                           latency='low') as stream:
 
-            pcm = inbuf[:, 0]  # recorded mono
+                # key the transmitter *just* around the burst
+                radio.ptt_on()
+                # write() will block until outbuf has been sent *and* inbuf filled
+                inbuf, _ = stream.write(outbuf)  
+                radio.ptt_off()
+
+            pcm = inbuf[:, 0]  # collapse to 1-d array
 
             # --- save the raw capture ---
             filename = os.path.join(output_dir, f"toad_{ch}.wav")
