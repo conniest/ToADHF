@@ -176,12 +176,11 @@ def main():
         print(f"Usage: {sys.argv[0]} <input.wav>")
         sys.exit(1)
 
-    # Settings for 2 frames per symbol
-    target = 2
+    target = 4
     hop_needed = calc_hop_size_for_target_frames(target)
     rate_needed = calc_sample_rate_for_target_frames(target)
-    print(f"For ~{target} frames/symbol at {GGWAVE_SAMPLE_RATE}Hz, HOP_SIZE≈{hop_needed}")
-    print(f"Or keep HOP_SIZE={HOP_SIZE} and use sample rate≈{rate_needed}Hz")
+    #print(f"For ~{target} frames/symbol at {GGWAVE_SAMPLE_RATE}Hz, HOP_SIZE≈{hop_needed}")
+    #print(f"Or keep HOP_SIZE={HOP_SIZE} and use sample rate≈{rate_needed}Hz")
 
     rate, wavf = load_wav(sys.argv[1])
     if rate != GGWAVE_SAMPLE_RATE:
@@ -193,8 +192,8 @@ def main():
     for i, b in enumerate(bits):
         print(f"[DEBUG] {i}: {''.join(str(x) for x in b)}")
 
-    runs = decode_payload_runs(bits)
-    fpc = estimate_frames_per_char(runs)
+    #runs = decode_payload_runs(bits)
+    fpc = 4
     msg = decode_message(bits, fpc)
     print(f"Frames/char: {fpc}")
     print(f"Decoded: {msg}")
