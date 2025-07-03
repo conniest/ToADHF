@@ -20,55 +20,7 @@ GGWAVE_SYMBOL_DURATION_S = 1.0 / GGWAVE_SYMBOL_RATE
 GGWAVE_SYMBOL_HOP_FRAMES = 2     # exactly 2 STFT‐columns per symbol
 
 # === Codebook Definitions ===
-TEXT_TO_GGWAVE = {
-    " ": "1100000000000000011100000",
-    "0": "1100000000000000001110000",
-    "1": "1110000000000000001110000",
-    "2": "0111000000000000001110000",
-    "3": "0011100000000000001110000",
-    "4": "0001110000000000001110000",
-    "5": "0000111000000000001110000",
-    "6": "0000011100000000001110000",
-    "7": "0000001110000000001110000",
-    "8": "0000000111000000001110000",
-    "9": "0000000011100000001110000",
-    "A": "1110000000000000000111000",
-    "B": "0111000000000000000111000",
-    "C": "0011100000000000000111000",
-    "D": "0001110000000000000111000",
-    "E": "0000111000000000000111000",
-    "F": "0000011100000000000111000",
-    "G": "0000001110000000000111000",
-    "H": "0000000111000000000111000",
-    "I": "0000000011100000000111000",
-    "J": "0000000001110000000111000",
-    "K": "0000000000111000000111000",
-    "L": "0000000000011100000111000",
-    "M": "0000000000001110000111000",
-    "N": "0000000000000111000111000",
-    "O": "0000000000000011100111000",
-    "P": "1100000000000000000011100",
-    "Q": "1110000000000000000011100",
-    "R": "0111000000000000000011100",
-    "S": "0011100000000000000011100",
-    "T": "0001110000000000000011100",
-    "U": "0000111000000000000011100",
-    "V": "0000011100000000000011100",
-    "W": "0000001110000000000011100",
-    "X": "0000000111000000000011100",
-    "Y": "0000000011100000000011100",
-    "Z": "0000000001110000000011100",
-    "-": "0000000000001110011100000",
-    ",": "0000000000011100011100000",
-    ".": "0000000000000111111100000",
-    "!": "1110000000000000011100000",
-    "?": "0000000000000011111110000",
-    "@": "1100000000000000000111000",
-    "$": "0001110000000000011100000",
-    "#": "0011100000000000011100000",
-}
-# Reverse lookup
-GGWAVE_TO_TEXT = {v: k for k, v in TEXT_TO_GGWAVE.items()}
+from ggwave_alphabet import TEXT_TO_GGWAVE, GGWAVE_TO_TEXT
 
 # === Spectrogram & I/O ===
 def compute_spectrogram(waveform, rate):
@@ -87,6 +39,53 @@ def load_wav(filename):
 
 # === Boundary Detection ===
 def detect_start_frame(spectrogram, freqs):
+    """
+    Find the first run of at least 3 consecutive high-energy, all-ones frames.
+    Returns (start_idx, end_idx, energy, threshold, min_idx, max_idx).
+    """
+    # locate frequency bin range for GGWave tones
+    min_idx = np.argmin(np.abs(freqs - GGWAVE_FREQ_MIN))
+    max_idx = np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + GGWAVE_FREQ_STEP * (GGWAVE_NUM_TONES - 1))))
+    energy = np.sum(spectrogram[min_idx:max_idx+1, :], axis=0)
+    threshold = 0.5 * np.mean(energy)
+
+    # precompute tone-bin indices
+    tone_bins = [
+        np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + j * GGWAVE_FREQ_STEP)))
+        for j in range(GGWAVE_NUM_TONES)
+    ]
+    all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
+
+    def frame_bits(col):
+        # extract energy per tone at column `col`
+        en = np.array([
+            np.sum(spectrogram[max(0, b-1):min(b+2, spectrogram.shape[0]), col])
+            for b in tone_bins
+        ])
+        return (en > 0.5 * en.max()).astype(np.uint8)
+
+    # scan for 3+ consecutive high‐energy frames whose first two (or three) are all‐ones
+    for i in range(len(energy) - 2):
+        if energy[i] > threshold and energy[i+1] > threshold and energy[i+2] > threshold:
+            # require the first 3 frames to have exactly the all‐ones pattern
+            if (np.array_equal(frame_bits(i), all_ones)
+                and np.array_equal(frame_bits(i+1), all_ones)
+                and np.array_equal(frame_bits(i+2), all_ones)):
+                # now extend the run until energy drops below threshold
+                j = i + 3
+                while np.array_equal(frame_bits(j), all_ones):
+                    j += 1
+                end_idx = j - 1
+                print(f"[INFO] SFD starts at column {i}, ends at column {end_idx}")
+                return i, end_idx, energy, threshold, min_idx, max_idx
+
+    raise RuntimeError(
+        "No valid SFD found: need ≥3 consecutive high‐energy, all-ones frames"
+    )
+
+
+
+def detect_end_frame(spectrogram, freqs, signal_start=0):
     """
     Find first column where at least 3 consecutive frames exceed threshold
     AND the first two frames have an all-ones tone pattern.
@@ -111,28 +110,17 @@ def detect_start_frame(spectrogram, freqs):
 
     all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
     # scan for 3 high-energy in a row
-    for i in range(len(energy) - 2):
+    for i in range(signal_start, len(energy) - 2):
         if (energy[i] > threshold and energy[i+1] > threshold and energy[i+2] > threshold):
             # require exact all-ones pattern in first two frames
             bits0 = frame_bits(i)
             bits1 = frame_bits(i+1)
             bits2 = frame_bits(i+2)
             if np.array_equal(bits0, all_ones) and np.array_equal(bits1, all_ones) and np.array_equal(bits2, all_ones):
-                print(f"[INFO] SFD starts at column {i}")
-                return i, energy, threshold, min_idx, max_idx
-    raise RuntimeError("No valid SFD found (need 3 consecutive high-energy frames with first two all-ones)")
+                print(f"[INFO] EFD starts at column {i}")
+                return i
+    raise RuntimeError("No valid EFD found (need 3 consecutive high-energy frames with first two all-ones)")
 
-
-def detect_end_frame(spectrogram, freqs, energy, threshold, min_idx, max_idx):
-    """
-    Find last column where at least 3 consecutive frames (backwards) exceed threshold.
-    Returns index of the last high-energy column in that run.
-    """
-    for i in range(len(energy) - 1, 1, -1):
-        if energy[i] > threshold and energy[i-1] > threshold and energy[i-2] > threshold:
-            print(f"[INFO] EFD ends at column {i}")
-            return i
-    raise RuntimeError("No valid EFD found (need 3 consecutive high-energy frames)")
 
 # === Binarization & Trimming ===
 def binarize_symbol_frames(symbol_frames, threshold_ratio=0.5):
@@ -144,9 +132,9 @@ def binarize_symbol_frames(symbol_frames, threshold_ratio=0.5):
 
 
 def trim_and_binarize_between(spectrogram, freqs, metadata_frames=11, threshold_ratio=0.5):
-    start, energy, thresh, mi, ma = detect_start_frame(spectrogram, freqs)
-    end = detect_end_frame(spectrogram, freqs, energy, thresh, mi, ma)
-    idxs = list(range(start, end+1, GGWAVE_SYMBOL_HOP_FRAMES))
+    start, start_e, energy, thresh, mi, ma = detect_start_frame(spectrogram, freqs)
+    end = detect_end_frame(spectrogram, freqs, signal_start=start_e+metadata_frames)
+    idxs = list(range(start, end, GGWAVE_SYMBOL_HOP_FRAMES))
     tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + i * GGWAVE_FREQ_STEP)))
                  for i in range(GGWAVE_NUM_TONES)]
     frames = []

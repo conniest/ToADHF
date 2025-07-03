@@ -2,6 +2,10 @@
 from radio_common import IC7300, K3S
 from ggwave_decoder import decode_wav_file, decode_wav_file_multi
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
+import threading, time, os
+
 import ggwave
 import threading
 import sounddevice as sd
@@ -133,73 +137,63 @@ def detect_ggwave_region(data, fs, window_ms=100, threshold=0.005):
     return None, None
 
 
-def listen_loop(radio, device="USB Audio CODEC", samplerate=48000):
-    record_duration = 10.0  # seconds per chunk
+def listen_loop(session, radio, device="USB Audio CODEC", samplerate=48000):
+    record_duration = 10.0
     output_dir = "recordings"
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"[ToAD] Listening on {radio} ('{device}')")
+    with patch_stdout():
+        print(f"[ToAD] Listening on {radio} ('{device}')")
+        stream = sd.InputStream(device=device, channels=1, samplerate=samplerate, dtype='float32')
+        stream.start()
 
-    frames_per_chunk = int(record_duration * samplerate)
-    stream = sd.InputStream(device=device, channels=1, samplerate=samplerate, dtype='float32')
-    stream.start()
+        while True:
+            audio, _ = stream.read(int(record_duration * samplerate))
+            filename = os.path.join(output_dir, f"toad_{time.strftime('%Y%m%d_%H%M%S')}.wav")
+            sf.write(filename, audio, samplerate)
 
-    
+            try:
+                results = decode_wav_file_multi(filename)
+            except RuntimeError:
+                print(f"[ToAD] No decode from last {record_duration}s")
+                continue
 
-    while True:
-        # if radio.tx_lock.locked():
-        #     time.sleep(0.1)
-        #     continue
+            for msg in results:
+                print(f"[RECV] {msg}")
 
-        #print("[ToAD] Capturing audio chunk...")
-        audio, _ = stream.read(frames_per_chunk)
-
-        filename = os.path.join(
-            output_dir,
-            f"toad_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-        )
-        sf.write(filename, audio, samplerate)
-        #print(f"[ToAD] Saved → {filename}")
-
-        pcm = audio[:, 0].astype(np.float32)  # mono
-
-        # Use pcm directly for detection to keep indices aligned
-        start, end = detect_sfd_pair_or_fallback(pcm, samplerate)
-        result = None
-
-        try:
-            result = decode_wav_file(filename)
-        except RuntimeError:
-            print(f"[ToAD] No Decode from last {record_duration} sec")
-
-        if result:
-            print(f"\n[RECV] {result}\n> ", end='', flush=True)
-        else:
-            print(f"[ToAD] No Decode from last {record_duration} sec")
 def main():
     radio = IC7300()
     radio.set_mode('LSB-D')
+    samplerate = 48000
 
-    # Optional: set sounddevice defaults
-    # sd.default.device = (None, usb_audio_output_device)  # (output, input)
+    # Build our PromptSession once
+    session = PromptSession("[SEND] > ")
 
-    rx_thread = threading.Thread(target=listen_loop, args=(radio,), daemon=True)
+    # Start listener thread, passing the session so it can print above it
+    rx_thread = threading.Thread(target=listen_loop, args=(session, radio), daemon=True)
     rx_thread.start()
     time.sleep(0.5)
+
     try:
         while True:
-            text = input("[SEND] > ").upper()
-            payload = ggwave.encode( text.encode(), protocolId=1)
+            # prompt_toolkit will redraw the [SEND] > prompt after any print()
+            text = session.prompt().upper()
+            payload = ggwave.encode(text.encode(), protocolId=1)
+
             with radio.tx_lock:
                 radio.ptt_on()
                 samples = np.frombuffer(payload, dtype=np.float32)
-                padding = np.zeros(int(.02 * 48000), dtype=np.float32)  # 250ms silence
-                padded = np.concatenate([padding, samples, padding])
-                sd.play(padded, samplerate=48000, device=usb_audio_output_device)
+                padding = np.zeros(int(0.02 * samplerate), dtype=np.float32)
+                sd.play(np.concatenate([padding, samples, padding]), samplerate=samplerate,
+                        device=usb_audio_output_device)
                 sd.wait()
                 radio.ptt_off()
+
     finally:
         radio.close()
+
+if __name__ == '__main__':
+    main()
 
 if __name__ == '__main__':
     main()

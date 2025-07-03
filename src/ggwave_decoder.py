@@ -38,7 +38,55 @@ def load_wav(filename):
     return rate, data.astype(np.float32)
 
 # === Boundary Detection ===
+# === Boundary Detection ===
 def detect_start_frame(spectrogram, freqs):
+    """
+    Find the first run of at least 3 consecutive high-energy, all-ones frames.
+    Returns (start_idx, end_idx, energy, threshold, min_idx, max_idx).
+    """
+    # locate frequency bin range for GGWave tones
+    min_idx = np.argmin(np.abs(freqs - GGWAVE_FREQ_MIN))
+    max_idx = np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + GGWAVE_FREQ_STEP * (GGWAVE_NUM_TONES - 1))))
+    energy = np.sum(spectrogram[min_idx:max_idx+1, :], axis=0)
+    threshold = 0.5 * np.mean(energy)
+
+    # precompute tone-bin indices
+    tone_bins = [
+        np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + j * GGWAVE_FREQ_STEP)))
+        for j in range(GGWAVE_NUM_TONES)
+    ]
+    all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
+
+    def frame_bits(col):
+        # extract energy per tone at column `col`
+        en = np.array([
+            np.sum(spectrogram[max(0, b-1):min(b+2, spectrogram.shape[0]), col])
+            for b in tone_bins
+        ])
+        return (en > 0.5 * en.max()).astype(np.uint8)
+
+    # scan for 3+ consecutive high‐energy frames whose first two (or three) are all‐ones
+    for i in range(len(energy) - 2):
+        if energy[i] > threshold and energy[i+1] > threshold and energy[i+2] > threshold:
+            # require the first 3 frames to have exactly the all‐ones pattern
+            if (np.array_equal(frame_bits(i), all_ones)
+                and np.array_equal(frame_bits(i+1), all_ones)
+                and np.array_equal(frame_bits(i+2), all_ones)):
+                # now extend the run until energy drops below threshold
+                j = i + 3
+                while np.array_equal(frame_bits(j), all_ones):
+                    j += 1
+                end_idx = j - 1
+                # print(f"[INFO] SFD starts at column {i}, ends at column {end_idx}")
+                return i, end_idx, energy, threshold, min_idx, max_idx
+
+    raise RuntimeError(
+        "No valid SFD found: need ≥3 consecutive high‐energy, all-ones frames"
+    )
+
+
+
+def detect_end_frame(spectrogram, freqs, signal_start=0):
     """
     Find first column where at least 3 consecutive frames exceed threshold
     AND the first two frames have an all-ones tone pattern.
@@ -63,28 +111,21 @@ def detect_start_frame(spectrogram, freqs):
 
     all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
     # scan for 3 high-energy in a row
-    for i in range(len(energy) - 2):
+    for i in range(signal_start, len(energy) - 2):
         if (energy[i] > threshold and energy[i+1] > threshold and energy[i+2] > threshold):
             # require exact all-ones pattern in first two frames
             bits0 = frame_bits(i)
             bits1 = frame_bits(i+1)
             bits2 = frame_bits(i+2)
             if np.array_equal(bits0, all_ones) and np.array_equal(bits1, all_ones) and np.array_equal(bits2, all_ones):
-                #print(f"[INFO] SFD starts at column {i}")
-                return i, energy, threshold, min_idx, max_idx
-    raise RuntimeError("No valid SFD found (need 3 consecutive high-energy frames with first two all-ones)")
-
-
-def detect_end_frame(spectrogram, freqs, energy, threshold, min_idx, max_idx):
-    """
-    Find last column where at least 3 consecutive frames (backwards) exceed threshold.
-    Returns index of the last high-energy column in that run.
-    """
-    for i in range(len(energy) - 1, 1, -1):
-        if energy[i] > threshold and energy[i-1] > threshold and energy[i-2] > threshold:
-            #print(f"[INFO] EFD ends at column {i}")
-            return i
-    raise RuntimeError("No valid EFD found (need 3 consecutive high-energy frames)")
+                #print(f"[INFO] EFD starts at column {i}")
+                # now extend the run until energy drops below threshold
+                j = i + 3
+                while np.array_equal(frame_bits(j), all_ones):
+                    j += 1
+                end_idx = j - 1
+                return i, end_idx
+    raise RuntimeError("No valid EFD found (need 3 consecutive high-energy frames with first two all-ones)")
 
 # === Binarization & Trimming ===
 def binarize_symbol_frames(symbol_frames, threshold_ratio=0.5):
@@ -96,8 +137,8 @@ def binarize_symbol_frames(symbol_frames, threshold_ratio=0.5):
 
 
 def trim_and_binarize_between(spectrogram, freqs, metadata_frames=11, threshold_ratio=0.5):
-    start, energy, thresh, mi, ma = detect_start_frame(spectrogram, freqs)
-    end = detect_end_frame(spectrogram, freqs, energy, thresh, mi, ma)
+    start, start_e, energy, thresh, mi, ma = detect_start_frame(spectrogram, freqs)
+    end, end_e = detect_end_frame(spectrogram, freqs, signal_start=start_e+metadata_frames)
     idxs = list(range(start, end+1, GGWAVE_SYMBOL_HOP_FRAMES))
     tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + i * GGWAVE_FREQ_STEP)))
                  for i in range(GGWAVE_NUM_TONES)]
@@ -195,68 +236,40 @@ def decode_wav_file(filename, frames_per_char=4):
     return None
 
 # === Multi-Transmission Decode API ===
-def decode_wav_file_multi(filename, frames_per_char=4, metadata_frames=11):
+def decode_wav_file_multi(filename, frames_per_char=4):
     """
-    Load a WAV file and decode all GGWave bursts within it.
-    Returns a list of decoded message strings.
+    Decode all GGWave bursts in <filename>, returning a list of decoded strings.
+    Uses trim_and_binarize_between + decode_message_fuzzy under the hood,
+    and then masks out each burst before looking for the next.
     """
     rate, waveform = load_wav(filename)
     if rate != GGWAVE_SAMPLE_RATE:
         print(f"Warning: sample rate {rate} != expected {GGWAVE_SAMPLE_RATE}")
-    # Compute spectrogram & frequency bins
     spec = compute_spectrogram(waveform, rate)
     freqs = np.fft.rfftfreq(FFT_SIZE, d=1.0/rate)
 
-    # Energy & threshold
-    min_idx = np.argmin(np.abs(freqs - GGWAVE_FREQ_MIN))
-    max_idx = np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + GGWAVE_FREQ_STEP*(GGWAVE_NUM_TONES-1))))
-    energy = np.sum(spec[min_idx:max_idx+1, :], axis=0)
-    threshold = 0.5 * np.mean(energy)
-
-    # Helper: bit pattern for each column
-    tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + j*GGWAVE_FREQ_STEP))) for j in range(GGWAVE_NUM_TONES)]
-    def frame_bits(col):
-        en = np.array([np.sum(spec[max(0,b-1):min(b+2,spec.shape[0]), col]) for b in tone_bins])
-        return (en > 0.5 * np.max(en)).astype(np.uint8)
-    all_ones = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
-
-    # Detect delimiter runs (>=3 consecutive all-ones frames)
-    high = energy > threshold
-    runs = []
-    i = 0
-    while i < len(high):
-        if high[i]:
-            j = i
-            while j < len(high) and high[j]:
-                j += 1
-            if (j - i) >= 3 and all(np.array_equal(frame_bits(k), all_ones) for k in (i, i+1, i+2)):
-                runs.append((i, j-1))
-            i = j
-        else:
-            i += 1
-
-    # Pair runs and decode each segment
+    spec_work = spec.copy()
     messages = []
-    for k in range(0, len(runs), 2):
-        if k+1 >= len(runs):
-            break
-        s0, _ = runs[k]
-        _, e1 = runs[k+1]
-        # Extract and trim frames between s0 and e1
-        idxs = list(range(s0, e1+1, GGWAVE_SYMBOL_HOP_FRAMES))
-        frames = [np.array([np.sum(spec[max(0,b-1):min(b+2,spec.shape[0]), t]) for b in tone_bins])
-                  for t in idxs]
-        bits_all = binarize_symbol_frames(np.array(frames))
-        sfd_pat = np.ones(GGWAVE_NUM_TONES, dtype=np.uint8)
-        data_mask = np.any(bits_all != sfd_pat, axis=1)
-        first_d = np.argmax(data_mask)
-        last_d = len(data_mask) - 1 - np.argmax(data_mask[::-1])
-        start_p = first_d + metadata_frames
-        end_p = last_d - metadata_frames
-        payload = bits_all[start_p:end_p]
-        messages.append(decode_message_fuzzy(payload, frames_per_char))
+
+    while True:
+        # Try to trim & binarize the *next* burst
+        try:
+            bits = trim_and_binarize_between(spec_work, freqs)
+        except RuntimeError:
+            break  # no more SFD/EFD pairs → done
+
+        # Fuzzy-decode that burst
+        msg = decode_message_fuzzy(bits, frames_per_char)
+        messages.append(msg)
+
+        # Now locate and zero out exactly that burst in the spectrogram
+        # so the next iteration finds the following one.
+        s_start, s_end, energy, threshold, min_idx, max_idx = detect_start_frame(spec_work, freqs)
+        e_start, e_end = detect_end_frame(spec_work, freqs, signal_start=s_end)
+        spec_work[:, s_start:e_end+1] = 0  # mask out columns of that burst
 
     return messages
+
 
 
 # === Main ===
