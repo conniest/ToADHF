@@ -2,6 +2,7 @@ import numpy as np
 import scipy.io.wavfile as wav
 import scipy.signal
 import sys
+from collections import Counter
 
 # === FFT Parameters ===
 FFT_SIZE = 1024
@@ -176,7 +177,7 @@ def estimate_frames_per_char(runs):
 
 
 # === Fuzzy Decode ===
-def decode_message_fuzzy(bits, frames_per_char=4):
+def decode_message_fuzzy(bits, frames_per_char=16):
     """
     Perform a majority-vote across each block of `frames_per_char` frames.
     If one symbol wins >50%, pick it. If a 2-2 tie, return both as "[a|b]".
@@ -204,6 +205,32 @@ def decode_message_fuzzy(bits, frames_per_char=4):
     return ''.join(decoded)
 
 
+def decode_redundant_message(decoded_chars, redundancy=4):
+    """
+    Take a string whose length may not be an exact multiple of `redundancy`.
+    Split into full chunks of `redundancy` chars and majority‐vote each chunk
+    down to one character (or "[a|b]" on ties).  Any leftover chars at the end
+    are discarded (round‐down).
+    """
+    final = []
+    length = len(decoded_chars)
+    # compute how many chars we can actually use
+    usable = (length // redundancy) * redundancy
+
+    # iterate by character index, stepping redundancy chars at a time
+    for start in range(0, usable, redundancy):
+        block = decoded_chars[start : start + redundancy]
+        counts = Counter(block)
+        max_votes = max(counts.values())
+        winners = sorted(ch for ch, v in counts.items() if v == max_votes)
+        if len(winners) == 1:
+            final.append(winners[0])
+        else:
+            final.append(f"[{'|'.join(winners)}]")
+
+    return ''.join(final)
+
+
 # === Utility: Frame/Sample Calculators ===
 def calc_hop_size_for_target_frames(target_frames, sample_rate=GGWAVE_SAMPLE_RATE, symbol_rate=GGWAVE_SYMBOL_RATE):
     return int(sample_rate / (symbol_rate * target_frames))
@@ -227,12 +254,13 @@ def decode_wav_file(filename, frames_per_char=4):
     freqs = np.fft.rfftfreq(FFT_SIZE, d=1.0/rate)
     # trim and binarize payload
     bits = trim_and_binarize_between(spec, freqs)
-    #for i, b in enumerate(bits):
-    #    print(f"[DEBUG] {i}: {''.join(str(x) for x in b)}")
+    for i, b in enumerate(bits):
+        print(f"[DEBUG] {i}: {''.join(str(x) for x in b)}")
     # fuzzy-decode message
     msg = decode_message_fuzzy(bits, frames_per_char)
+    final_msg = decode_redundant_message(msg)
     if msg:
-        return msg
+        return final_msg
     return None
 
 # === Multi-Transmission Decode API ===
@@ -243,8 +271,8 @@ def decode_wav_file_multi(filename, frames_per_char=4):
     and then masks out each burst before looking for the next.
     """
     rate, waveform = load_wav(filename)
-    if rate != GGWAVE_SAMPLE_RATE:
-        print(f"Warning: sample rate {rate} != expected {GGWAVE_SAMPLE_RATE}")
+    # if rate != GGWAVE_SAMPLE_RATE:
+    #    print(f"Warning: sample rate {rate} != expected {GGWAVE_SAMPLE_RATE}")
     spec = compute_spectrogram(waveform, rate)
     freqs = np.fft.rfftfreq(FFT_SIZE, d=1.0/rate)
 
@@ -255,12 +283,15 @@ def decode_wav_file_multi(filename, frames_per_char=4):
         # Try to trim & binarize the *next* burst
         try:
             bits = trim_and_binarize_between(spec_work, freqs)
+            #for i, b in enumerate(bits):
+            #    print(f"[DEBUG] {i}: {''.join(str(x) for x in b)}")
         except RuntimeError:
             break  # no more SFD/EFD pairs → done
 
         # Fuzzy-decode that burst
         msg = decode_message_fuzzy(bits, frames_per_char)
-        messages.append(msg)
+        final_msg = decode_redundant_message(msg)
+        messages.append(final_msg)
 
         # Now locate and zero out exactly that burst in the spectrogram
         # so the next iteration finds the following one.

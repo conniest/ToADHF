@@ -178,7 +178,10 @@ def main():
         while True:
             # prompt_toolkit will redraw the [SEND] > prompt after any print()
             text = session.prompt().upper()
-            payload = ggwave.encode(text.encode(), protocolId=1)
+            multiplied_text = ""
+            for char in text:
+                multiplied_text += char*4
+            payload = ggwave.encode(multiplied_text.encode(), protocolId=1)
 
             with radio.tx_lock:
                 radio.ptt_on()
