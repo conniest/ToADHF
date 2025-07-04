@@ -20,7 +20,7 @@ class IC7300:
         ]
         cmd.extend(*args)
         print(cmd)
-        print(f"Running command: {' '.join(c for c in cmd)}")
+        #print(f"Running command: {' '.join(c for c in cmd)}")
         subprocess.run(cmd, check=True)
 
     def enable_sidetone(self, level=1.0):
