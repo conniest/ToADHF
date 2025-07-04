@@ -163,7 +163,7 @@ def listen_loop(session, radio, device="USB Audio CODEC", samplerate=48000):
 
 def main():
     radio = IC7300()
-    radio.set_mode('LSB-D')
+    radio.set_mode('DATA')
     samplerate = 48000
 
     # Build our PromptSession once

@@ -205,24 +205,51 @@ def decode_message_fuzzy(bits, frames_per_char=16):
     return ''.join(decoded)
 
 
-def decode_redundant_message(decoded_chars, redundancy=4):
+from collections import Counter
+
+def decode_redundant_message(decoded_chars, redundancy=4, frames_per_char=4):
     """
-    Take a string whose length may not be an exact multiple of `redundancy`.
-    Split into full chunks of `redundancy` chars and majority‐vote each chunk
-    down to one character (or "[a|b]" on ties).  Any leftover chars at the end
-    are discarded (round‐down).
+    Take a sequence of fuzzy-decoded symbols (length ≥ redundancy), in which each
+    "real" symbol was sent redundancy times.  Split into blocks of size redundancy,
+    then for each block:
+
+      • If a token is a single char (e.g. 'K'), it contributes frames_per_char votes
+        to that char.
+      • If a token is a tie like "[A|B]", it contributes frames_per_char/2 votes to A
+        and frames_per_char/2 votes to B.
+      • (You can extend to "[A|B|C]" by splitting on '|' and dividing equally.)
+
+    After summing all votes in the block, pick whichever char(s) have the highest
+    total.  If there’s still a multi-way tie at the end, emit "[A|B|…]".  Any
+    leftover tail chars (len(decoded_chars) % redundancy) are dropped.
+
+    Returns a single string of length floor(len(decoded_chars)/redundancy).
     """
+
     final = []
     length = len(decoded_chars)
-    # compute how many chars we can actually use
     usable = (length // redundancy) * redundancy
 
-    # iterate by character index, stepping redundancy chars at a time
     for start in range(0, usable, redundancy):
         block = decoded_chars[start : start + redundancy]
-        counts = Counter(block)
-        max_votes = max(counts.values())
-        winners = sorted(ch for ch, v in counts.items() if v == max_votes)
+
+        # Accumulate weighted votes
+        scores = {}
+        for token in block:
+            if token.startswith('[') and token.endswith(']'):
+                # tie-token → multiple candidates
+                candidates = token[1:-1].split('|')
+            else:
+                candidates = [token]
+
+            weight = frames_per_char / len(candidates)
+            for c in candidates:
+                scores[c] = scores.get(c, 0) + weight
+
+        # Pick the winner(s)
+        max_score = max(scores.values())
+        winners = sorted(c for c, v in scores.items() if v == max_score)
+
         if len(winners) == 1:
             final.append(winners[0])
         else:

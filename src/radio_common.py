@@ -17,17 +17,19 @@ class IC7300:
             "-m", str(self.model),
             "-r", self.device,
             "-s", str(self.baud),
-            *args
         ]
+        cmd.extend(*args)
+        print(cmd)
+        print(f"Running command: {' '.join(c for c in cmd)}")
         subprocess.run(cmd, check=True)
 
     def enable_sidetone(self, level=1.0):
         """Enable monitor audio for sidetone generation during PTT."""
-        self._rigctl("l", "MONITOR_GAIN", str(level))
+        self._rigctl(["l", "MONITOR_GAIN", str(level)])
 
     def set_freq(self, freq_hz):
         """Set operating frequency."""
-        self._rigctl("F", str(freq_hz))
+        self._rigctl(["F", str(freq_hz)])
 
     def set_mode(self, mode):
         """Set mode and passband."""
@@ -36,21 +38,22 @@ class IC7300:
             "USB": ("USB", "2400"),
             "LSB": ("LSB", "2400"),
             # Data
-            "USB-D": ("USB", "2400", "DIG_MODE", "1"),
-            "LSB-D": ("LSB", "2400", "DIG_MODE", "1"),
+            "DATA-U": ("USB-D", "3000"),
+            "DATA": ("USB-D", "3000"),
+            "DATA-L": ("LSB-D", "3000"),
             # CW 
             "CW": ("CW", "500")
         }
         if mode not in mode_map:
             raise ValueError(f"Unsupported mode: {mode}")
-
-        self._rigctl("M", mode)
+        cmd = ["M"] + [m for m in mode_map[mode]]
+        self._rigctl(cmd)
 
     def ptt_on(self):
-        self._rigctl("T", "1")
+        self._rigctl(["T", "1"])
 
     def ptt_off(self):
-        self._rigctl("T", "0")
+        self._rigctl(["T", "0"])
 
     def close(self):
         pass  # rigctl does not require closing
