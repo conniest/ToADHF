@@ -15,6 +15,7 @@ import time
 import collections
 import os
 import datetime
+import atexit
 from scipy.signal import butter, lfilter, spectrogram 
 
 usb_audio_output_device = "USB Audio CODEC"
@@ -166,6 +167,10 @@ def main():
     radio.set_mode('DATA')
     samplerate = 48000
 
+    # These functions are idempotent so they can be called more than once.
+    atexit.register(radio.ptt_off)
+    atexit.register(radio.close)
+
     # Build our PromptSession once
     session = PromptSession("[SEND] > ")
 
@@ -185,7 +190,7 @@ def main():
 
             with radio.tx_lock:
                 radio.ptt_on()
-                samples = np.frombuffer(payload, dtype=np.float32)
+                samples = 10 * np.frombuffer(payload, dtype=np.float32) * 20
                 padding = np.zeros(int(0.02 * samplerate), dtype=np.float32)
                 sd.play(np.concatenate([padding, samples, padding]), samplerate=samplerate,
                         device=usb_audio_output_device)
@@ -193,10 +198,8 @@ def main():
                 radio.ptt_off()
 
     finally:
+        radio.ptt_off()
         radio.close()
-
-if __name__ == '__main__':
-    main()
 
 if __name__ == '__main__':
     main()

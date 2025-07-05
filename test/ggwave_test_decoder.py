@@ -132,8 +132,12 @@ def binarize_symbol_frames(symbol_frames, threshold_ratio=0.5):
 
 
 def trim_and_binarize_between(spectrogram, freqs, metadata_frames=11, threshold_ratio=0.5):
-    start, start_e, energy, thresh, mi, ma = detect_start_frame(spectrogram, freqs)
-    end = detect_end_frame(spectrogram, freqs, signal_start=start_e+metadata_frames)
+    try:
+        start, start_e, energy, thresh, mi, ma = detect_start_frame(spectrogram, freqs)
+        end = detect_end_frame(spectrogram, freqs, signal_start=start_e+metadata_frames)
+    except:
+        start = 0
+        end = len(spectrogram)
     idxs = list(range(start, end, GGWAVE_SYMBOL_HOP_FRAMES))
     tone_bins = [np.argmin(np.abs(freqs - (GGWAVE_FREQ_MIN + i * GGWAVE_FREQ_STEP)))
                  for i in range(GGWAVE_NUM_TONES)]
