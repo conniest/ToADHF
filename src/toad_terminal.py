@@ -1,6 +1,7 @@
 # ggwave_terminal.py
 from radio_common import IC7300, K3S
-from ggwave_decoder import decode_wav_file, decode_wav_file_multi
+from toad_decoder import decode_file
+from toad_encoder import encode_text_to_waveform
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -17,6 +18,8 @@ import os
 import datetime
 import atexit
 from scipy.signal import butter, lfilter, spectrogram 
+
+from config import *
 
 usb_audio_output_device = "USB Audio CODEC"
 
@@ -154,7 +157,7 @@ def listen_loop(session, radio, device="USB Audio CODEC", samplerate=48000):
             sf.write(filename, audio, samplerate)
 
             try:
-                results = decode_wav_file_multi(filename)
+                results = decode_file(filename)
             except RuntimeError:
                 print(f"[ToAD] No decode from last {record_duration}s")
                 continue
@@ -163,9 +166,22 @@ def listen_loop(session, radio, device="USB Audio CODEC", samplerate=48000):
                 print(f"[RECV] {msg}")
 
 def main():
-    radio = IC7300()
+    radio = RADIO_CLASS()
+    if RADIO_AUDIO_NAME is not None:
+        radio.audio = audio
+
+    if RADIO_CAT_PORT is not None:
+        radio.device = RADIO_CAT_PORT
+
+    if RADIO_BAUD_RATE is not None:
+        radio.baud = RADIO_BAUD_RATE
+
+    freq = int(input("Enter operating frequency in KHz: ").replace(".", "").replace(",", ""))
+
+    radio.set_freq(freq*1000)
+
     radio.set_mode('DATA')
-    samplerate = 48000
+    samplerate = SAMPLE_RATE
 
     # These functions are idempotent so they can be called more than once.
     atexit.register(radio.ptt_off)
@@ -185,15 +201,15 @@ def main():
             text = session.prompt().upper()
             multiplied_text = ""
             for char in text:
-                multiplied_text += char*4
-            payload = ggwave.encode(multiplied_text.encode(), protocolId=1)
+                multiplied_text += char*CHAR_LEVEL_REDUNDANCY
+            payload = encode_text_to_waveform(multiplied_text)
 
             with radio.tx_lock:
                 radio.ptt_on()
-                samples = 10 * np.frombuffer(payload, dtype=np.float32) * 20
+                samples = SAMPLE_MULTIPLICATION_FACTOR * np.frombuffer(payload, dtype=np.float32)
                 padding = np.zeros(int(0.02 * samplerate), dtype=np.float32)
                 sd.play(np.concatenate([padding, samples, padding]), samplerate=samplerate,
-                        device=usb_audio_output_device)
+                        device=radio.audio)
                 sd.wait()
                 radio.ptt_off()
 

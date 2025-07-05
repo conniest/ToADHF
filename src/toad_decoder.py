@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from pathlib import Path
-
+from config import * 
 import numpy as np
 import scipy.io.wavfile as wav
 import scipy.signal as sig
@@ -182,7 +182,7 @@ def _vote(char_stream: list[str], redundancy: int) -> str:
 # Decode pipeline
 # -----------------------------------------------------------------------------
 
-def decode_file(path: str | Path, redundancy: int = 4, *, debug: bool = False) -> str:
+def decode_file(path: str | Path, redundancy: int = CHAR_LEVEL_REDUNDANCY, *, debug: bool = False) -> str:
     rate, wav_data = wav.read(path)
     if rate != SR:
         raise ValueError(f"Expected {SR} Hz wav, got {rate}")
@@ -208,7 +208,7 @@ def decode_file(path: str | Path, redundancy: int = 4, *, debug: bool = False) -
     sym_cols  = data_cols[::SYMBOL_HOP_FRAMES]
 
     char_stream = [_symbols_from_bits(_frame_bits(spec, c, tbins)) for c in sym_cols]
-    return _vote(char_stream, redundancy).replace("^", "")
+    return [_vote(char_stream, redundancy).replace("^", "")]
 
 # -----------------------------------------------------------------------------
 # CLI
