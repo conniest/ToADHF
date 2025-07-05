@@ -4,21 +4,7 @@ import scipy.signal
 import sys
 from collections import Counter
 
-# === FFT Parameters ===
-FFT_SIZE = 1024
-HOP_SIZE = FFT_SIZE / 3.55          # 256 samples → 48000/256 ≈ 187.5 Hz
-WINDOW   = np.hanning(FFT_SIZE)
-
-
-# === GGWave AudibleFast Parameters ===
-GGWAVE_SAMPLE_RATE       = 48000
-# STFT update rate = 48000/256 ≈ 187.5 Hz → to get 2 frames/symbol:
-GGWAVE_SYMBOL_RATE       = int(round( (GGWAVE_SAMPLE_RATE/HOP_SIZE) / 2 ))
-GGWAVE_NUM_TONES         = 25
-GGWAVE_FREQ_MIN          = 1875.0
-GGWAVE_FREQ_STEP         = 46.875
-GGWAVE_SYMBOL_DURATION_S = 1.0 / GGWAVE_SYMBOL_RATE
-GGWAVE_SYMBOL_HOP_FRAMES = 2     # exactly 2 STFT‐columns per symbol
+from config import *
 
 # === Codebook Definitions ===
 from ggwave_alphabet import TEXT_TO_GGWAVE, GGWAVE_TO_TEXT
