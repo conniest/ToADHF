@@ -1,5 +1,5 @@
 # ggwave_terminal.py
-from radio_common import IC7300, K3S
+from radio_common import IC7300, K3S, FTDX10
 from ggwave_decoder import decode_wav_file, decode_wav_file_multi
 
 from prompt_toolkit import PromptSession
@@ -162,7 +162,7 @@ def listen_loop(session, radio, device="USB Audio CODEC", samplerate=48000):
                 print(f"[RECV] {msg}")
 
 def main():
-    radio = IC7300()
+    radio = FTDX10()
     radio.set_mode('DATA')
     samplerate = 48000
 
@@ -181,7 +181,7 @@ def main():
             multiplied_text = ""
             for char in text:
                 multiplied_text += char*4
-            payload = ggwave.encode(multiplied_text.encode(), protocolId=1)
+            payload = ggwave.encode(multiplied_text, protocolId=1)
 
             with radio.tx_lock:
                 radio.ptt_on()
